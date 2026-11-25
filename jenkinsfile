@@ -76,7 +76,7 @@ stages {
                 git config user.name "Jenkins"
                 git config user.email "jenkins@example.com"
 
-                git add k8s/manifest.yaml
+                git add manifest/deployment.yaml
                 git commit -m "Update Kubernetes image"
             '''
         }
