@@ -1,96 +1,113 @@
 pipeline {
-agent any
+    agent any
 
-environment {
-    DOCKER_CREDENTIALS_ID = 'docker-cred'
-    DOCKER_IMAGE          = 'hithatreesathomas/test-repo'
-    SONAR_SERVER_NAME     = 'sonarqube-env'
-    SONAR_SCANNER_TOOL    = 'sonar-scanner'
-    GIT_CREDENTIALS_ID    = 'github-cred'
-}
-
-stages {
-
-    stage('Checkout Source Code') {
-        steps {
-            git branch: 'main',
-                credentialsId: "${GIT_CREDENTIALS_ID}",
-                url: 'https://github.com/hithatreesa/test-repo.git'
-        }
+    environment {
+        DOCKER_CREDENTIALS_ID = 'docker-cred'
+        DOCKER_IMAGE          = 'hithatreesathomas/test-repo'
+        SONAR_SERVER_NAME     = 'sonarqube-env'
+        SONAR_SCANNER_TOOL    = 'sonar-scanner'
+        GIT_CREDENTIALS_ID    = 'github-cred'
     }
 
-    stage('SonarQube Analysis') {
-        steps {
-            withSonarQubeEnv("${SONAR_SERVER_NAME}") {
-                script {
-                    def scannerHome = tool "${SONAR_SCANNER_TOOL}"
+    stages {
 
+        stage('Checkout Source Code') {
+            steps {
+                git branch: 'main',
+                    credentialsId: "${GIT_CREDENTIALS_ID}",
+                    url: 'https://github.com/hithatreesa/test-repo.git'
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv("${SONAR_SERVER_NAME}") {
+                    script {
+                        def scannerHome = tool "${SONAR_SCANNER_TOOL}"
+
+                        sh """
+                            ${scannerHome}/bin/sonar-scanner \
+                            -Dsonar.projectKey=test-repo \
+                            -Dsonar.sources=. \
+                            -Dsonar.sourceEncoding=UTF-8
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh "docker build -f dockerfile -t ${DOCKER_IMAGE}:latest ."
+            }
+        }
+
+        stage('Docker Login and Push') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${DOCKER_CREDENTIALS_ID}",
+                        usernameVariable: 'DOCKER_USERNAME',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
                     sh """
-                        ${scannerHome}/bin/sonar-scanner \
-                        -Dsonar.projectKey=test-repo \
-                        -Dsonar.sources=. \
-                        -Dsonar.sourceEncoding=UTF-8
+                        echo "\$DOCKER_PASSWORD" | docker login \
+                        -u "\$DOCKER_USERNAME" --password-stdin
+
+                        docker push ${DOCKER_IMAGE}:latest
+
+                        docker logout
                     """
+                }
+            }
+        }
+
+        stage('Update Kubernetes Manifest') {
+            steps {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        set -eu
+                        sed -i "s|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:latest|" manifest/deployment.yaml
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@example.com"
+                        git add manifest/deployment.yaml
+
+                        if ! git diff --cached --quiet; then
+                            git commit -m "Update Kubernetes image"
+                            askpass=$(mktemp)
+                            trap 'rm -f "$askpass"' EXIT
+                            cat > "$askpass" <<'EOF'
+#!/bin/sh
+case "$1" in
+    *Username*) printf '%s\n' "$GIT_USERNAME" ;;
+    *) printf '%s\n' "$GIT_PASSWORD" ;;
+esac
+EOF
+                            chmod 700 "$askpass"
+                            GIT_ASKPASS="$askpass" GIT_TERMINAL_PROMPT=0 git push origin HEAD:main
+                        else
+                            echo "No manifest changes to commit."
+                        fi
+                    '''
                 }
             }
         }
     }
 
-    stage('Docker Build') {
-        steps {
-            sh """
-                docker build -t ${DOCKER_IMAGE}:latest .
-            """
+    post {
+        success {
+            echo 'Pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed. Please check the Jenkins console output.'
         }
     }
-
-    stage('Docker Login and Push') {
-        steps {
-            withCredentials([
-                usernamePassword(
-                    credentialsId: "${DOCKER_CREDENTIALS_ID}",
-                    usernameVariable: 'DOCKER_USERNAME',
-                    passwordVariable: 'DOCKER_PASSWORD'
-                )
-            ]) {
-                sh '''
-                    echo "$DOCKER_PASSWORD" | docker login \
-                    -u "$DOCKER_USERNAME" --password-stdin
-
-                    docker push ${DOCKER_IMAGE}:latest
-
-                    docker logout
-                '''
-            }
-        }
-    }
-
-    sstage('Update Kubernetes Manifest') {
-    steps {
-        script {
-            sh """
-                sed -i 's|image: ${DOCKER_IMAGE}:.*|image: ${DOCKER_IMAGE}:latest|' k8s/manifest.yaml
-            """
-
-            sh '''
-                git config user.name "Jenkins"
-                git config user.email "jenkins@example.com"
-
-                git add manifest/deployment.yaml
-                git commit -m "Update Kubernetes image"
-            '''
-        }
-    }
-}
-
-post {
-    success {
-        echo 'Pipeline completed successfully!'
-    }
-
-    failure {
-        echo 'Pipeline failed. Please check the Jenkins console output.'
-    }
-}
-
 }
